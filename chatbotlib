@@ -1,0 +1,90 @@
+from flask import Flask, render_template, request
+import os
+import io
+import tempfile
+from chatterbot import ChatBot
+from chatterbot.trainers import ChatterBotCorpusTrainer
+from pdfminer.converter import TextConverter
+from pdfminer.layout import LAParams
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+from pdfminer.pdfpage import PDFPage
+
+# Initialize Flask App
+app = Flask(__name__)
+
+# Load trained bot data if available
+try:
+    bot = ChatBot('My Bot', storage_adapter='chatterbot.storage.SQLStorageAdapter')
+    corpus_trainer = ChatterBotCorpusTrainer(bot)
+    corpus_trainer.load('chatterbot_corpus.english')
+except Exception as e:
+    print(f"Error loading existing bot data: {e}")
+    bot = ChatBot('My Bot', storage_adapter='chatterbot.storage.SQLStorageAdapter')
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    global bot
+
+    # Train the bot with user-provided text
+    if request.method == 'POST':
+        user_input = request.form.get('user_input')
+        bot_response = bot.get_response(user_input)
+        
+        conversation = [[user_input, str(bot_response)]]
+
+        # Update the database with the new training data
+        trainer = ChatterBotCorpusTrainer(bot)
+        updated_data = list(map(lambda x: '\n'.join(x), zip(*conversation)))
+        trainer.train([updated_data])
+
+    else:
+        user_input = ''
+        bot_response = None
+
+    return render_template('index.html', user_input=user_input, bot_response=bot_response)
+
+@app.route('/extract_text', methods=['POST'])
+def extract_text():
+    global bot
+    
+    if request.method == 'POST':
+        file = request.files['pdf']
+
+        if file:
+            resource_manager = PDFResourceManager()
+            retstr = io.StringIO()
+            layout_params = LAParams()
+            device = TextConverter(resource_manager, retstr, laparams=layout_params)
+            
+            with io.BytesIO(file.read()) as fp:
+                document = PDFDocument(fp)
+                interpreter = PDFPageInterpreter(resource_manager, device)
+                password = ""
+                maxpages = 0
+                caching = True
+                pagenos=set()
+
+                for page in PDFPage.create_pages(document):
+                    interpreter.process_page(page)
+
+                text = retstr.getvalue()
+
+            device.close()
+            retstr.close()
+
+            # Add extracted text to bot training data
+            bot_response = bot.get_response(text)
+            conversation = [[text, str(bot_response)]]
+
+            trainer = ChatterBotCorpusTrainer(bot)
+            updated_data = list(map(lambda x: '\n'.join(x), zip(*conversation)))
+            trainer.train([updated_data], 'custom')
+
+            return {'status': 'success'}
+        else:
+            return {'status': 'error', 'message': 'Invalid file.'}
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", debug=True, port=port)
